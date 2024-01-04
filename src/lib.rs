@@ -1,48 +1,10 @@
 pub use dmbf_impl::bitfield;
 
+pub mod underlay;
+pub use underlay::RawField;
+use underlay::RawFieldOps;
+
 use std::{cell::Cell, ptr};
-
-/// Raw field type (`u8`, `u16`, `u32`, `u64`)
-pub trait RawField:
-    Copy
-    + Default
-    + core::ops::BitOr<Output = Self>
-    + core::ops::BitAnd<Output = Self>
-    + core::ops::BitOrAssign
-    + core::ops::BitAndAssign
-    + core::ops::Not<Output = Self>
-    + core::ops::Shl<u8, Output = Self>
-    + core::ops::Shr<u8, Output = Self>
-{
-}
-
-macro_rules! impl_raw_field {
-    ($U : ty) => {
-        impl RawField for $U {}
-        impl FieldSpec for $U {
-            type Ux = $U;
-
-            const DEFAULT: Self::Ux = 0;
-            const MASK: Self::Ux = !0;
-            const SHIFT: u8 = 0;
-
-            type Target = Self;
-
-            #[inline]
-            fn from_underlay(v: Self::Ux) -> Self::Target {
-                v
-            }
-            #[inline]
-            fn into_underlay(v: Self::Target) -> Self::Ux {
-                v
-            }
-        }
-    };
-}
-impl_raw_field!(u8);
-impl_raw_field!(u16);
-impl_raw_field!(u32);
-impl_raw_field!(u64);
 
 pub trait FieldSpec: Sized {
     type Ux: RawField;
@@ -71,7 +33,7 @@ impl<F: FieldSpec> Field<F> {
 
     #[inline]
     pub fn raw(&self) -> F::Ux {
-        unsafe { (ptr::read_volatile(self.as_ptr()) & F::MASK) >> F::SHIFT }
+        unsafe { (ptr::read_volatile(self.as_ptr()).bitand(F::MASK)).shr(F::SHIFT) }
     }
 
     #[inline]
@@ -85,7 +47,9 @@ impl<F: FieldSpec> Field<F> {
         unsafe {
             ptr::write_volatile(
                 self.as_ptr(),
-                (value << F::SHIFT) & F::MASK | (ptr::read_volatile(self.as_ptr()) & !F::MASK),
+                (value.shl(F::SHIFT))
+                    .bitand(F::MASK)
+                    .bitor(ptr::read_volatile(self.as_ptr()).bitand(F::MASK.not())),
             );
         }
     }
@@ -95,7 +59,10 @@ impl<F: FieldSpec> Field<F> {
         unsafe {
             ptr::write_volatile(
                 self.as_ptr(),
-                (F::DEFAULT << F::SHIFT) & F::MASK | (ptr::read_volatile(self.as_ptr()) & !F::MASK),
+                F::DEFAULT
+                    .shl(F::SHIFT)
+                    .bitand(F::MASK)
+                    .bitor(ptr::read_volatile(self.as_ptr()).bitand(F::MASK.not())),
             );
         }
     }
@@ -112,3 +79,54 @@ where
         }
     }
 }
+
+macro_rules! impl_field_spec_for_raw_field {
+    ($( $U : ty ), *) => {
+        $(
+            impl RawField for $U {}
+            impl FieldSpec for $U {
+                type Ux = $U;
+
+                const DEFAULT: Self::Ux = 0;
+                const MASK: Self::Ux = !0;
+                const SHIFT: u8 = 0;
+
+                type Target = Self;
+
+                #[inline]
+                fn from_underlay(v: Self::Ux) -> Self::Target {
+                    v
+                }
+                #[inline]
+                fn into_underlay(v: Self::Target) -> Self::Ux {
+                    v
+                }
+            }
+        )*
+    };
+    ($( $l : literal ), *) => {
+        $(
+            impl RawField for [u8; $l] {}
+            impl FieldSpec for [u8; $l] {
+                type Ux = [u8; $l];
+
+                const DEFAULT: Self::Ux = [0; $l];
+                const MASK: Self::Ux = [!0; $l];
+                const SHIFT: u8 = 0;
+
+                type Target = Self;
+
+                #[inline]
+                fn from_underlay(v: Self::Ux) -> Self::Target {
+                    v
+                }
+                #[inline]
+                fn into_underlay(v: Self::Target) -> Self::Ux {
+                    v
+                }
+            }
+        )*
+    }
+}
+impl_field_spec_for_raw_field!(u8, u16, u32, u64);
+impl_field_spec_for_raw_field!(3, 5, 6, 7);

@@ -16,8 +16,7 @@ struct BitfieldAttr {
     pub bits: Option<u8>,
 
     /// Default value for the bitfield
-    #[darling(default)]
-    pub default: u64,
+    pub default: Option<syn::Expr>,
 
     /// Use From/Into to convert the value
     #[darling(default)]
@@ -35,7 +34,7 @@ impl AddAssign for BitfieldAttr {
         if self.bits.is_none() {
             self.bits = rhs.bits;
         }
-        if self.default == 0 {
+        if self.default.is_none() {
             self.default = rhs.default;
         }
         if !self.from_into {
@@ -54,7 +53,7 @@ impl FromAttributes for BitfieldAttr {
     fn from_attributes(attrs: &[syn::Attribute]) -> darling::Result<Self> {
         let mut final_attr = Self {
             bits: None,
-            default: 0,
+            default: None,
             from_into: false,
             from: None,
             into: None,
@@ -104,21 +103,76 @@ fn gen_field_def(
             .to_case(convert_case::Case::UpperCamel)
     );
 
-    let ux = match bits {
+    let (ux, mask) = match bits {
         Some(bits) => match bits {
-            8 => quote! { u8 },
-            16 => quote! { u16 },
-            32 => quote! { u32 },
-            64 => quote! { u64 },
+            8 => (quote! { u8 }, quote! { #mask as u8 }),
+            16 => (quote! { u16 }, quote! { #mask as u16 }),
+            24 => {
+                if mask == !0 {
+                    (quote! { [u8; 3] }, quote! { [0xff, 0xff, 0xff] })
+                } else {
+                    (
+                        quote! { [u8; 3] },
+                        quote! { [((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
+                    )
+                }
+            }
+            32 => (quote! { u32 }, quote! { #mask as u32 }),
+            40 => {
+                if mask == !0 {
+                    (
+                        quote! { [u8; 5] },
+                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff] },
+                    )
+                } else {
+                    (
+                        quote! { [u8; 5] },
+                        quote! { [((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
+                    )
+                }
+            }
+            48 => {
+                if mask == !0 {
+                    (
+                        quote! { [u8; 6] },
+                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff, 0xff] },
+                    )
+                } else {
+                    (
+                        quote! { [u8; 6] },
+                        quote! { [((#mask >> 40) & 0xff) as u8, ((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
+                    )
+                }
+            }
+            56 => {
+                if mask == !0 {
+                    (
+                        quote! { [u8; 7] },
+                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff] },
+                    )
+                } else {
+                    (
+                        quote! { [u8; 7] },
+                        quote! { [((#mask >> 48) & 0xff) as u8, ((#mask >> 40) & 0xff) as u8, ((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
+                    )
+                }
+            }
+            64 => (quote! { u64 }, quote! { #mask as u64 }),
             _ => unreachable!(),
         },
-        None => quote! { <#target_type as dmbf::FieldSpec>::Ux },
+        None => (
+            quote! { <#target_type as dmbf::FieldSpec>::Ux },
+            quote! { <#target_type as dmbf::FieldSpec>::MASK },
+        ),
     };
 
     let default_value = bitfield_attr.default;
-    let default_value = quote! { #default_value as #ux };
+    let default_value = match default_value {
+        Some(default_value) => quote! { #default_value },
+        None => quote! { <#ux as dmbf::FieldSpec>::DEFAULT },
+    };
 
-    let mask = quote! { #mask as Self::Ux };
+    // let mask = quote! { #mask as Self::Ux };
     let shift = quote! { #shift };
 
     let from_inner = if let Some(f) = bitfield_attr.from {
