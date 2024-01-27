@@ -5,12 +5,26 @@
 /// - [u8; 3], [u8; 5], [u8; 6], [u8; 7]
 pub trait RawField: Copy + Default + RawFieldOps {}
 
+macro_rules! impl_raw_field {
+    ($( $U : ty ), *) => {
+        $(
+            impl RawField for $U {}
+        )*
+    };
+}
+
+impl_raw_field!(u8, u16, [u8; 3], u32, [u8; 5], [u8; 6], [u8; 7], u64);
+
 pub trait RawFieldOps {
     fn not(&self) -> Self;
     fn bitand(&self, rhs: Self) -> Self;
     fn bitor(&self, rhs: Self) -> Self;
     fn shl(&self, rhs: u8) -> Self;
     fn shr(&self, rhs: u8) -> Self;
+    fn from_be(x: Self) -> Self;
+    fn from_le(x: Self) -> Self;
+    fn to_be(&self) -> Self;
+    fn to_le(&self) -> Self;
 }
 
 macro_rules! impl_raw_field_ops_ux {
@@ -36,6 +50,22 @@ macro_rules! impl_raw_field_ops_ux {
                 #[inline]
                 fn shr(&self, rhs: u8) -> Self {
                     self >> rhs
+                }
+                #[inline]
+                fn from_be(x: Self) -> Self {
+                    Self::from_be(x)
+                }
+                #[inline]
+                fn from_le(x: Self) -> Self {
+                    Self::from_le(x)
+                }
+                #[inline]
+                fn to_be(&self) -> Self {
+                    Self::to_be(*self)
+                }
+                #[inline]
+                fn to_le(&self) -> Self {
+                    Self::to_le(*self)
                 }
             }
         )*
@@ -82,25 +112,56 @@ macro_rules! impl_raw_field_ops_u8s {
                     if rhs == 0 {
                         return *self;
                     }
-                    let mut ret = [0; $l];
-                    let mut tmp: u16 = 0;
-                    for i in (0..$l).rev() {
-                        tmp = (self[i] as u16) << rhs | (tmp >> 8);
-                        ret[i] = tmp as u8;
+
+                    let mut tmp: [u8; 8] = [0; 8];
+                    for i in 8-$l..8 {
+                        tmp[i] = self[i-(8-$l)];
                     }
+                    let mut tmp = u64::from_be_bytes(tmp);
+                    tmp <<= rhs;
+                    let tmp = tmp.to_be_bytes();
+                    let ret = tmp[8-$l..8].try_into().unwrap();
                     ret
                 }
                 #[inline]
                 fn shr(&self, rhs: u8) -> Self {
+
                     if rhs == 0 {
                         return *self;
                     }
+
+                    let mut tmp: [u8; 8] = [0; 8];
+                    for i in 8-$l..8 {
+                        tmp[i] = self[i-(8-$l)];
+                    }
+                    let mut tmp = u64::from_be_bytes(tmp);
+                    tmp >>= rhs;
+                    let tmp = tmp.to_be_bytes();
+                    let ret = tmp[8-$l..8].try_into().unwrap();
+                    ret
+
+                }
+                #[inline]
+                fn from_be(x: Self) -> Self {
+                    x
+                }
+                #[inline]
+                fn from_le(x: Self) -> Self {
                     let mut ret = [0; $l];
-                    let mut tmp: u16 = 0;
                     for i in 0..$l {
-                        tmp = ((self[i] as u16) << (8 - rhs)) | (tmp << 8);
-                        ret[i] = ((tmp & 0xff00) >> 8) as u8;
-                        tmp &= 0x00ff;
+                        ret[i] = x[$l - i - 1];
+                    }
+                    ret
+                }
+                #[inline]
+                fn to_be(&self) -> Self {
+                    *self
+                }
+                #[inline]
+                fn to_le(&self) -> Self {
+                    let mut ret = [0; $l];
+                    for i in 0..$l {
+                        ret[$l - i - 1] = self[i];
                     }
                     ret
                 }

@@ -1,14 +1,14 @@
 extern crate proc_macro;
 
-use std::ops::AddAssign;
+use std::ops::{Add, AddAssign};
 
 use convert_case::Casing;
-use darling::{FromAttributes, FromMeta};
+use darling::{ast::NestedMeta, FromAttributes, FromMeta};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, Field, Ident, ItemStruct};
 
-#[derive(Debug, FromMeta)]
+#[derive(Clone, Debug, Default, FromMeta)]
 struct BitfieldAttr {
     /// Number of bits to use for the bitfield
     ///
@@ -17,6 +17,9 @@ struct BitfieldAttr {
 
     /// Default value for the bitfield
     pub default: Option<syn::Expr>,
+
+    /// Endianness of the underlay type
+    pub endianness: Option<syn::Expr>,
 
     /// Use From/Into to convert the value
     #[darling(default)]
@@ -29,35 +32,38 @@ struct BitfieldAttr {
     pub into: Option<syn::Expr>,
 }
 
+impl Add<&BitfieldAttr> for BitfieldAttr {
+    type Output = Self;
+
+    fn add(self, rhs: &Self) -> Self::Output {
+        Self {
+            bits: self.bits.or(rhs.bits),
+            default: self.default.or(rhs.default.clone()),
+            endianness: self.endianness.or(rhs.endianness.clone()),
+            from_into: self.from_into || rhs.from_into,
+            from: self.from.or(rhs.from.clone()),
+            into: self.into.or(rhs.into.clone()),
+        }
+    }
+}
+
+impl Add for BitfieldAttr {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        self + &rhs
+    }
+}
+
 impl AddAssign for BitfieldAttr {
     fn add_assign(&mut self, rhs: Self) {
-        if self.bits.is_none() {
-            self.bits = rhs.bits;
-        }
-        if self.default.is_none() {
-            self.default = rhs.default;
-        }
-        if !self.from_into {
-            self.from_into = rhs.from_into;
-        }
-        if self.from.is_none() {
-            self.from = rhs.from;
-        }
-        if self.into.is_none() {
-            self.into = rhs.into;
-        }
+        *self = self.clone() + rhs;
     }
 }
 
 impl FromAttributes for BitfieldAttr {
     fn from_attributes(attrs: &[syn::Attribute]) -> darling::Result<Self> {
-        let mut final_attr = Self {
-            bits: None,
-            default: None,
-            from_into: false,
-            from: None,
-            into: None,
-        };
+        let mut final_attr = Self::default();
 
         for attr in attrs {
             if attr.path().is_ident("bitfield") {
@@ -74,6 +80,8 @@ impl FromAttributes for BitfieldAttr {
 
 fn gen_field_def(
     field: &Field,
+    // global attr, used to set endianness...
+    attr: BitfieldAttr,
     bits: Option<u8>,
     mask: u64,
     shift: u8,
@@ -87,8 +95,8 @@ fn gen_field_def(
     let field_name = field.ident.as_ref().unwrap().clone();
     let field_name_mut = format_ident!("{}_mut", field_name);
     let target_type = &field.ty;
-    let bitfield_attr = BitfieldAttr::from_attributes(&field.attrs).unwrap();
-    let dot_attr = field.attrs.iter().filter(|a| a.path().is_ident("doc"));
+    let bitfield_attr = BitfieldAttr::from_attributes(&field.attrs).unwrap() + attr;
+    let doc_attr = field.attrs.iter().filter(|a| a.path().is_ident("doc"));
 
     let field_spec_name = format_ident!(
         "{}Spec",
@@ -103,65 +111,66 @@ fn gen_field_def(
             .to_case(convert_case::Case::UpperCamel)
     );
 
-    let (ux, mask) = match bits {
+    let (underlay, mask) = match bits {
         Some(bits) => match bits {
-            8 => (quote! { u8 }, quote! { #mask as u8 }),
-            16 => (quote! { u16 }, quote! { #mask as u16 }),
-            24 => {
-                if mask == !0 {
-                    (quote! { [u8; 3] }, quote! { [0xff, 0xff, 0xff] })
-                } else {
-                    (
-                        quote! { [u8; 3] },
-                        quote! { [((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
-                    )
-                }
+            8 => {
+                let mask = mask as u8;
+                (quote! { u8 }, quote! { #mask })
             }
-            32 => (quote! { u32 }, quote! { #mask as u32 }),
+            16 => {
+                let mask = mask as u16;
+                (quote! { u16 }, quote! { #mask as u16 })
+            }
+            24 => {
+                let mask: [u8; 3] = [
+                    ((mask >> 16) & 0xff) as u8,
+                    ((mask >> 8) & 0xff) as u8,
+                    (mask & 0xff) as u8,
+                ];
+                (quote! { [u8; 3] }, quote! { [#(#mask,)*] })
+            }
+            32 => {
+                let mask = mask as u32;
+                (quote! { u32 }, quote! { #mask })
+            }
             40 => {
-                if mask == !0 {
-                    (
-                        quote! { [u8; 5] },
-                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff] },
-                    )
-                } else {
-                    (
-                        quote! { [u8; 5] },
-                        quote! { [((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
-                    )
-                }
+                let mask: [u8; 5] = [
+                    ((mask >> 32) & 0xff) as u8,
+                    ((mask >> 24) & 0xff) as u8,
+                    ((mask >> 16) & 0xff) as u8,
+                    ((mask >> 8) & 0xff) as u8,
+                    (mask & 0xff) as u8,
+                ];
+                (quote! { [u8; 5] }, quote! { [#(#mask,)*] })
             }
             48 => {
-                if mask == !0 {
-                    (
-                        quote! { [u8; 6] },
-                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff, 0xff] },
-                    )
-                } else {
-                    (
-                        quote! { [u8; 6] },
-                        quote! { [((#mask >> 40) & 0xff) as u8, ((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
-                    )
-                }
+                let mask: [u8; 6] = [
+                    ((mask >> 40) & 0xff) as u8,
+                    ((mask >> 32) & 0xff) as u8,
+                    ((mask >> 24) & 0xff) as u8,
+                    ((mask >> 16) & 0xff) as u8,
+                    ((mask >> 8) & 0xff) as u8,
+                    (mask & 0xff) as u8,
+                ];
+                (quote! { [u8; 6] }, quote! { [#(#mask,)*] })
             }
             56 => {
-                if mask == !0 {
-                    (
-                        quote! { [u8; 7] },
-                        quote! { [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff] },
-                    )
-                } else {
-                    (
-                        quote! { [u8; 7] },
-                        quote! { [((#mask >> 48) & 0xff) as u8, ((#mask >> 40) & 0xff) as u8, ((#mask >> 32) & 0xff) as u8, ((#mask >> 24) & 0xff) as u8, ((#mask >> 16) & 0xff) as u8, ((#mask >> 8) & 0xff) as u8, (#mask & 0xff) as u8] },
-                    )
-                }
+                let mask: [u8; 7] = [
+                    ((mask >> 48) & 0xff) as u8,
+                    ((mask >> 40) & 0xff) as u8,
+                    ((mask >> 32) & 0xff) as u8,
+                    ((mask >> 24) & 0xff) as u8,
+                    ((mask >> 16) & 0xff) as u8,
+                    ((mask >> 8) & 0xff) as u8,
+                    (mask & 0xff) as u8,
+                ];
+                (quote! { [u8; 7] }, quote! { [#(#mask,)*] })
             }
-            64 => (quote! { u64 }, quote! { #mask as u64 }),
+            64 => (quote! { u64 }, quote! { #mask }),
             _ => unreachable!(),
         },
         None => (
-            quote! { <#target_type as dmbf::FieldSpec>::Ux },
+            quote! { <#target_type as dmbf::FieldSpec>::Underlay },
             quote! { <#target_type as dmbf::FieldSpec>::MASK },
         ),
     };
@@ -169,11 +178,16 @@ fn gen_field_def(
     let default_value = bitfield_attr.default;
     let default_value = match default_value {
         Some(default_value) => quote! { #default_value },
-        None => quote! { <#ux as dmbf::FieldSpec>::DEFAULT },
+        None => quote! { <#underlay as dmbf::FieldSpec>::DEFAULT },
     };
 
     // let mask = quote! { #mask as Self::Ux };
     let shift = quote! { #shift };
+
+    let endianness = match bitfield_attr.endianness {
+        Some(endianness) => quote! { #endianness },
+        None => quote! { dmbf::Endianness::Lsb0 },
+    };
 
     let from_inner = if let Some(f) = bitfield_attr.from {
         quote! { (#f)(v) }
@@ -185,7 +199,7 @@ fn gen_field_def(
     let into_inner = if let Some(f) = bitfield_attr.into {
         quote! { (#f)(v) }
     } else if bitfield_attr.from_into {
-        quote! { Self::Ux::from(v) }
+        quote! { Self::Underlay::from(v) }
     } else {
         quote! { <Self::Target as dmbf::FieldSpec>::into_underlay(v) }
     };
@@ -193,21 +207,22 @@ fn gen_field_def(
     let field_def = quote! {
         pub struct #field_spec_name;
         impl dmbf::FieldSpec for #field_spec_name {
-            type Ux = #ux;
-            const DEFAULT: Self::Ux = #default_value;
-            const MASK: Self::Ux = #mask;
+            type Underlay = #underlay;
+            const DEFAULT: Self::Underlay = #default_value;
+            const MASK: Self::Underlay = #mask;
             const SHIFT: u8 = #shift;
+            const ENDIANNESS: dmbf::Endianness = #endianness;
             type Target = #target_type;
             #[inline]
-            fn from_underlay(v: Self::Ux) -> Self::Target {
+            fn from_underlay(v: Self::Underlay) -> Self::Target {
                 #from_inner
             }
             #[inline]
-            fn into_underlay(v: Self::Target) -> Self::Ux {
+            fn into_underlay(v: Self::Target) -> Self::Underlay {
                 #into_inner
             }
         }
-        #(#dot_attr)*
+        #(#doc_attr)*
         pub type #field_name_uc = dmbf::Field<#field_spec_name>;
     };
 
@@ -244,7 +259,9 @@ fn gen_field_def(
 }
 
 #[proc_macro_attribute]
-pub fn bitfield(_attr: TokenStream, input: TokenStream) -> TokenStream {
+pub fn bitfield(attr: TokenStream, input: TokenStream) -> TokenStream {
+    let global_attr = NestedMeta::parse_meta_list(attr.into()).unwrap();
+    let global_attr = BitfieldAttr::from_list(&global_attr).unwrap();
     let item = parse_macro_input!(input as ItemStruct);
 
     let attrs = &item.attrs;
@@ -308,7 +325,8 @@ pub fn bitfield(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     prefix_bits += b;
 
                     let (subfield_name, subfield_type, subfield_def, subfield_methods) =
-                        gen_field_def(f, Some(hybrid_field.1), mask, shift, &hybrid_field_name);
+                        // gen_field_def(f, Some(hybrid_field.1), mask, shift, &hybrid_field_name);
+                        gen_field_def(f, global_attr.clone(), Some(hybrid_field.1), mask, shift,&hybrid_field_name);
 
                     subfields_names.push(subfield_name);
                     subfields_types.push(subfield_type);
@@ -359,7 +377,8 @@ pub fn bitfield(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
             // Generate single field
             let (field_name, field_type, field_def, field_method) =
-                gen_field_def(field, field_attr.bits, !0, 0, &None);
+                // gen_field_def(field, field_attr.bits, !0, 0, &None);
+                gen_field_def(field, global_attr.clone(), field_attr.bits, !0, 0,  &None);
 
             field_names.push(field_name);
             field_types.push(field_type);
@@ -369,7 +388,7 @@ pub fn bitfield(_attr: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     quote! {
-        mod #mod_name{
+        pub mod #mod_name{
             use super::*;
 
             #(#field_defs)*

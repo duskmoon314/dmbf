@@ -1,10 +1,9 @@
 use dmbf::bitfield;
 
-#[bitfield]
+#[bitfield(endianness = dmbf::Endianness::Msb0)]
 pub struct Eth {
     dst: [u8; 6],
     src: [u8; 6],
-    #[bitfield(from = |v: u16| u16::from_be(v), into = |v: u16| u16::to_be(v))]
     ty: u16,
 }
 
