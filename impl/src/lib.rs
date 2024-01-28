@@ -2,7 +2,7 @@ extern crate proc_macro;
 
 use std::ops::{Add, AddAssign};
 
-use convert_case::Casing;
+use convert_case::{Boundary, Casing};
 use darling::{ast::NestedMeta, FromAttributes, FromMeta};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -102,12 +102,24 @@ fn gen_field_def(
         "{}Spec",
         field_name
             .to_string()
+            .with_boundaries(&[
+                Boundary::Acronym,
+                Boundary::DigitUpper,
+                Boundary::LowerUpper,
+                Boundary::Underscore,
+            ])
             .to_case(convert_case::Case::UpperCamel)
     );
     let field_name_uc = format_ident!(
         "{}",
         field_name
             .to_string()
+            .with_boundaries(&[
+                Boundary::Acronym,
+                Boundary::DigitUpper,
+                Boundary::LowerUpper,
+                Boundary::Underscore,
+            ])
             .to_case(convert_case::Case::UpperCamel)
     );
 
@@ -269,7 +281,17 @@ pub fn bitfield(attr: TokenStream, input: TokenStream) -> TokenStream {
     let name = &item.ident;
 
     // convert the name to snake case to get the name of module
-    let mod_name = format_ident!("{}", name.to_string().to_case(convert_case::Case::Snake));
+    let mod_name = format_ident!(
+        "{}",
+        name.to_string()
+            .with_boundaries(&[
+                Boundary::Acronym,
+                Boundary::DigitUpper,
+                Boundary::LowerUpper,
+                Boundary::Underscore,
+            ])
+            .to_case(convert_case::Case::Snake)
+    );
 
     let mut field_names: Vec<Ident> = Vec::new();
     let mut field_types: Vec<Ident> = Vec::new();
@@ -341,6 +363,12 @@ pub fn bitfield(attr: TokenStream, input: TokenStream) -> TokenStream {
                         .0
                         .unwrap()
                         .to_string()
+                        .with_boundaries(&[
+                            Boundary::Acronym,
+                            Boundary::DigitUpper,
+                            Boundary::LowerUpper,
+                            Boundary::Underscore,
+                        ])
                         .to_case(convert_case::Case::UpperCamel)
                 );
                 let hybrid_field_def = quote! {
